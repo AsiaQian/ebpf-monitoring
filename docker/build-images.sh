@@ -1,0 +1,1 @@
+docker build -t ubuntu_bbc_env:22.04 -f Dockerfile.bcc_env .

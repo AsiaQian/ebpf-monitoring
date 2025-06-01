@@ -1,0 +1,65 @@
+# Dockerfile
+
+# 使用支持 ARM64 的 Ubuntu 镜像作为基础镜像
+FROM ubuntu:22.04
+
+# --- 解决问题 3: Docker 容器不继承 Docker daemon 代理设置 ---
+# 明确设置代理环境变量，确保容器内部的网络请求通过代理
+# 请将 'http://192.168.5.2:7890' 替换为你实际的代理服务器 IP 和端口。
+# 192.168.5.2 通常是 Colima 内部网络中宿主机的 IP。
+ENV HTTP_PROXY="http://192.168.5.2:7890"
+ENV HTTPS_PROXY="http://192.168.5.2:7890"
+ENV NO_PROXY="localhost,127.0.0.1,colima.internal,colima.local,*.local,*.test"
+
+# --- 解决问题 1 & 2: 访问 ports.ubuntu.com 超时 & 缺少 ca-certificates ---
+# 1. 设置 apt 获取超时和重试，增加稳定性
+RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80retries && \
+    echo 'Acquire::HTTP::Timeout "90";' >> /etc/apt/apt.conf.d/80timeout && \
+    echo 'Acquire::FTP::Timeout "90";' >> /etc/apt/apt.conf.d/80timeout && \
+    echo 'Acquire::Queue-Timeout "180";' >> /etc/apt/apt.conf.d/80timeout && \
+    \
+    # 2. 备份原始 sources.list，并临时切换为阿里云镜像站的 HTTP 协议源
+    #    这是为了在没有 ca-certificates 的情况下，能够顺利进行 apt update 并安装 ca-certificates
+    cp /etc/apt/sources.list /etc/apt/sources.list.bak && \
+    \
+    echo "deb http://mirrors.aliyun.com/ubuntu-ports/ jammy main restricted universe multiverse" > /etc/apt/sources.list && \
+    echo "deb http://mirrors.aliyun.com/ubuntu-ports/ jammy-updates main restricted universe multiverse" >> /etc/apt/sources.list && \
+    echo "deb http://mirrors.aliyun.com/ubuntu-ports/ jammy-security main restricted universe multiverse" >> /etc/apt/sources.list && \
+    echo "deb http://mirrors.aliyun.com/ubuntu-ports/ jammy-backports main restricted universe multiverse" >> /etc/apt/sources.list && \
+    \
+    # 3. 执行第一次 apt update (通过 HTTP)，并安装 ca-certificates
+    #    如果这一步仍然失败，你需要检查代理和其到阿里云 HTTP 源的连接
+    apt update && \
+    apt install -y ca-certificates curl iputils-ping && \
+    \
+    # 4. 更新系统证书库，确保 ca-certificates 生效
+    update-ca-certificates && \
+    \
+    # 5. 安装 ca-certificates 成功后，切换回阿里云镜像站的 HTTPS 协议源 (推荐安全性)
+    sed -i 's@http://mirrors.aliyun.com/ubuntu-ports@https://mirrors.aliyun.com/ubuntu-ports@g' /etc/apt/sources.list && \
+    \
+    # 6. 执行第二次 apt update (通过 HTTPS)，验证源切换成功
+    apt update
+
+RUN apt install -y \
+    clang \
+    llvm \
+    libelf-dev \
+    libbpf-dev \
+    linux-headers-$(uname -r) \
+    python3-pip \
+    git \
+    bpfcc-tools \
+    pkg-config && \
+    \
+    # 清理 apt 缓存，减小镜像大小
+    rm -rf /var/lib/apt/lists/*
+
+# 设置工作目录
+WORKDIR /app
+
+# (可选) 复制你的 BCC 代码到容器中
+# COPY . /app
+
+# (可选) 定义容器启动时默认执行的命令
+# CMD ["bash"]
