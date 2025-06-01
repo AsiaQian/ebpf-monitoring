@@ -23,6 +23,11 @@ if [ $? -ne 0 ]; then
 fi
 echo "Docker image built successfully: ubuntu-bcc-env:latest"
 
-# (可选) 可以在这里添加运行容器的命令
-# echo "Running container..."
-# docker run -it --privileged ubuntu-bcc-env:latest bash
+# 提示可以运行eBPF demo应用
+echo "🎉 Docker image built successfully!"
+echo "To run your eBPF demo application, execute these commands in your terminal:"
+echo ""
+echo "    docker run -it --privileged -v /sys/kernel/tracing:/sys/kernel/tracing ubuntu-bcc-env:latest bash"
+echo "    python3 /app/ebpf-hello-world/hello.py"
+echo ""
+echo "Enjoy your eBPF development!"
