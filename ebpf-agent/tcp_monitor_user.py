@@ -24,7 +24,7 @@ class Event(ct.Structure):
         ("daddr_v6", ct.c_ubyte * 16),
         ("comm", ct.c_char * 16), # TASK_COMM_LEN is 16
         ("type", ct.c_int),
-        ("data_len", ct.c_ulonglong),
+        ("data_len", ct.c_ulonglong), # This will always be 0 now as read/write tracepoints are removed
     ]
 
 # Prometheus Pushgateway URL (if used)
@@ -33,21 +33,29 @@ PROMETHEUS_PUSHGATEWAY_URL = "http://localhost:9091" # To be replaced with K8s s
 # In-memory store for metrics (for a simple HTTP exporter)
 metrics_store = {}
 
-def update_metrics(key, metric_type, value=1):
-    """Updates a metric in the in-memory store."""
-    if key not in metrics_store:
-        metrics_store[key] = {}
-    if metric_type not in metrics_store[key]:
-        metrics_store[key][metric_type] = 0
-    metrics_store[key][metric_type] += value
+def update_metrics(key_dict, metric_type, value=1):
+    """Updates a metric in the in-memory store.
+    key_dict must be a dictionary that will be converted to a hashable tuple.
+    """
+    # === 关键修复点：将字典 key_dict 转换为可哈希的元组 ===
+    # 排序是为了确保键值对顺序不同但内容相同的字典能生成相同的哈希值
+    hashable_key = tuple(sorted(key_dict.items()))
+
+    if hashable_key not in metrics_store:
+        metrics_store[hashable_key] = {}
+    if metric_type not in metrics_store[hashable_key]:
+        metrics_store[hashable_key][metric_type] = 0
+    metrics_store[hashable_key][metric_type] += value
 
 def get_metrics_prometheus_format():
     """Generates Prometheus exposition format from metrics_store."""
     output = []
-    for key, data in metrics_store.items():
-        source_app = key.get('source_app', 'unknown')
-        dest_app = key.get('dest_app', 'unknown')
-        call_type = key.get('call_type', 'unknown') # 'java-to-java', 'java-to-mysql'
+    for hashable_key, data in metrics_store.items():
+        # 将可哈希的元组（hashable_key）转换回字典，以便访问其内容
+        key_dict = dict(hashable_key)
+        source_app = key_dict.get('source_app', 'unknown')
+        dest_app = key_dict.get('dest_app', 'unknown')
+        call_type = key_dict.get('call_type', 'unknown') # 'java-to-java', 'java-to-mysql'
 
         # Connection/Call Count
         if 'call_count' in data:
@@ -55,7 +63,7 @@ def get_metrics_prometheus_format():
             output.append(f'# TYPE app_call_count counter\n')
             output.append(f'app_call_count{{source_app="{source_app}",dest_app="{dest_app}",call_type="{call_type}"}} {data["call_count"]}\n')
 
-        # Bytes Transferred
+        # Bytes Transferred (will likely be 0 if read/write tracepoints are removed)
         if 'bytes_transferred' in data:
             output.append(f'# HELP app_bytes_transferred Total bytes transferred during application calls.\n')
             output.append(f'# TYPE app_bytes_transferred counter\n')
@@ -101,58 +109,40 @@ def print_event(cpu, data, size):
         daddr = socket.inet_ntop(socket.AF_INET6, bytes(event.daddr_v6))
 
     event_type_str = ""
-    source_app = comm # Default source
+    data_len_str = "" # Always 0 now
+
+    source_app = comm # Default source for client processes
     dest_app = "unknown" # Default dest
 
     if event.type == 0:
         event_type_str = "ACCEPT"
-        # For ACCEPT, the process (comm) is the server
-        # daddr and dport are the client's address and port
-        # saddr and lport are the server's address and listening port
-        # We assume the destination is the server that accepted the connection.
-        # Need to map ports/IPs to service names later.
-        # For simplicity, if dest port is MySQL (3306), it's java-to-mysql, otherwise java-to-java.
-        # This is a simplification; a more robust solution would involve service discovery/mapping.
         if event.dport == 3306:
             dest_app = "mysql"
             call_type = "java-to-mysql"
         else:
-            dest_app = "java_app_listener" # This needs to be resolved to actual service name
+            dest_app = "java_app_listener"
             call_type = "java-to-java"
 
-        key = {'source_app': 'client_app', 'dest_app': dest_app, 'call_type': call_type} # Client app needs to be identified via connect
+        # 这里传入的 key 依然是字典
+        key = {'source_app': 'client_app', 'dest_app': dest_app, 'call_type': call_type}
         update_metrics(key, 'call_count')
 
     elif event.type == 1:
         event_type_str = "CONNECT"
-        # For CONNECT, the process (comm) is the client
-        # saddr and lport are the client's address and port
-        # daddr and dport are the server's address and port
         if event.dport == 3306:
             dest_app = "mysql"
             call_type = "java-to-mysql"
         else:
-            dest_app = "java_app_target" # This needs to be resolved
+            dest_app = "java_app_target"
             call_type = "java-to-java"
 
+        # 这里传入的 key 依然是字典
         key = {'source_app': comm, 'dest_app': dest_app, 'call_type': call_type}
         update_metrics(key, 'call_count')
 
-    elif event.type == 2:
-        event_type_str = "READ"
-        # Here, `comm` is the process that performed the read
-        key = {'source_app': comm, 'dest_app': 'unknown', 'call_type': 'read_bytes'}
-        update_metrics(key, 'bytes_transferred', event.data_len)
-    elif event.type == 3:
-        event_type_str = "WRITE"
-        # Here, `comm` is the process that performed the write
-        key = {'source_app': comm, 'dest_app': 'unknown', 'call_type': 'write_bytes'}
-        update_metrics(key, 'bytes_transferred', event.data_len)
-
-
     print(f"{timestamp_ms:10.3f} {comm:16s} ({event.pid:6d}/{event.tgid:6d}) {event_type_str:7s} "
           f"{saddr}:{event.lport:<5d} -> {daddr}:{event.dport:<5d} "
-          f"AF:{event.af} Data Len: {event.data_len}")
+          f"AF:{event.af}")
 
 # Load the eBPF program
 try:
@@ -172,18 +162,13 @@ try:
     b.attach_kprobe(event="inet_csk_accept", fn_name="kprobe__inet_csk_accept")
     b.attach_kretprobe(event="inet_csk_accept", fn_name="kretprobe__inet_csk_accept")
 
-    # Attach to syscall tracepoints for read/write.
-    # Note: These are general read/write, not specific to sockets.
-    # More refined approach would be kprobes on tcp_recvmsg/tcp_sendmsg
-    b.attach_tracepoint(tp="syscalls:sys_enter_read", fn_name="syscalls_sys_enter_read")
-    b.attach_tracepoint(tp="syscalls:sys_enter_write", fn_name="syscalls_sys_enter_write")
-
 except Exception as e:
     print(f"Error attaching BPF probes: {e}")
     exit(1)
 
-print("eBPF TCP Monitor is running. Press Ctrl+C to stop.")
-print(f"{'Time':<10} {'Comm':<16} {'PID/TGID':<13} {'Event':<7} {'Source':<21} {'Dest':<21} {'AF':<4} {'Data Len':<10}")
+print("eBPF TCP Monitor is running. (Read/Write syscalls no longer monitored)")
+print("Press Ctrl+C to stop.")
+print(f"{'Time':<10} {'Comm':<16} {'PID/TGID':<13} {'Event':<7} {'Source':<21} {'Dest':<21} {'AF':<4}")
 
 # Start the Prometheus metrics server in a separate thread
 metrics_port = 8000
