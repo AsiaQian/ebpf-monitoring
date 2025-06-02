@@ -1,5 +1,6 @@
 # Use the official OpenJDK image
-FROM openjdk:17-jdk-slim
+# FROM openjdk:17-jdk-slim
+FROM ubuntu_openjdk:17
 
 ENV HTTP_PROXY="http://192.168.5.2:7890"
 ENV HTTPS_PROXY="http://192.168.5.2:7890"
@@ -14,7 +15,7 @@ WORKDIR /app
 COPY ${SRC_DIR}/target/inventory-service-0.0.1-SNAPSHOT.jar ./inventory-service.jar
 
 # Expose the port the app runs on
-EXPOSE 8080
+EXPOSE 8081
 
 # Run the jar file
 ENTRYPOINT ["java", "-jar", "inventory-service.jar"]

@@ -24,6 +24,9 @@ spec:
           volumeMounts:
             - name: grafana-storage
               mountPath: /var/lib/grafana
+            - name: grafana-datasources-volume # 挂载卷的名称，与下方 volumes 对应
+              mountPath: /etc/grafana/provisioning/datasources # Grafana 读取数据源配置的目录
+              readOnly: true # 只读挂载，防止容器修改配置
           env:
             - name: GF_SECURITY_ADMIN_USER
               value: admin
@@ -34,6 +37,9 @@ spec:
       volumes:
         - name: grafana-storage
           emptyDir: {} # For demonstration, use emptyDir. For persistence, use a PersistentVolumeClaim.
+        - name: grafana-datasources-volume # 卷的名称，与上方 volumeMounts 对应
+          configMap:
+              name: grafana-prometheus-datasource # 引用上面创建的 ConfigMap 的名称
 ---
 # 2. Grafana Service (NodePort for external access)
 apiVersion: v1

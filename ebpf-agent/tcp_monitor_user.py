@@ -27,9 +27,6 @@ class Event(ct.Structure):
         ("data_len", ct.c_ulonglong), # This will always be 0 now as read/write tracepoints are removed
     ]
 
-# Prometheus Pushgateway URL (if used)
-PROMETHEUS_PUSHGATEWAY_URL = "http://localhost:9091" # To be replaced with K8s service
-
 # In-memory store for metrics (for a simple HTTP exporter)
 metrics_store = {}
 

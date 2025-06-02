@@ -35,7 +35,7 @@ public class OrderService {
 
     public Order createOrder(String itemName, int quantity) {
         // 1. 调用 inventory-service 检查库存 (Java 应用间调用)
-        String inventoryServiceUrl = "http://inventory-service:8080/api/inventory/checkStock";
+        String inventoryServiceUrl = "http://inventory-service:8081/api/inventory/checkStock";
         UriComponentsBuilder builder = UriComponentsBuilder.fromHttpUrl(inventoryServiceUrl)
                 .queryParam("itemName", itemName)
                 .queryParam("quantity", quantity);

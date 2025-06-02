@@ -1,0 +1,22 @@
+FROM ubuntu-bcc-env:latest
+
+ENV HTTP_PROXY="http://192.168.5.2:7890"
+ENV HTTPS_PROXY="http://192.168.5.2:7890"
+ENV NO_PROXY="localhost,127.0.0.1,colima.internal,colima.local,*.local,*.test"
+
+RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80retries && \
+    echo 'Acquire::HTTP::Timeout "90";' >> /etc/apt/apt.conf.d/80timeout && \
+    echo 'Acquire::FTP::Timeout "90";' >> /etc/apt/apt.conf.d/80timeout && \
+    echo 'Acquire::Queue-Timeout "180";' >> /etc/apt/apt.conf.d/80timeout && \
+    cp /etc/apt/sources.list /etc/apt/sources.list.bak && \
+    echo "deb http://mirrors.aliyun.com/ubuntu-ports/ jammy main restricted universe multiverse" > /etc/apt/sources.list && \
+    echo "deb http://mirrors.aliyun.com/ubuntu-ports/ jammy-updates main restricted universe multiverse" >> /etc/apt/sources.list && \
+    echo "deb http://mirrors.aliyun.com/ubuntu-ports/ jammy-security main restricted universe multiverse" >> /etc/apt/sources.list && \
+    echo "deb http://mirrors.aliyun.com/ubuntu-ports/ jammy-backports main restricted universe multiverse" >> /etc/apt/sources.list && \
+    apt update && \
+    apt install -y ca-certificates && \
+    update-ca-certificates && \
+    sed -i 's@http://mirrors.aliyun.com/ubuntu-ports@https://mirrors.aliyun.com/ubuntu-ports@g' /etc/apt/sources.list && \
+    apt update && \
+    apt install -y \
+    openjdk-17-jdk

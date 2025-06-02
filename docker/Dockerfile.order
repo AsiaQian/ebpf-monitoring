@@ -1,5 +1,6 @@
 # Use the official OpenJDK image
-FROM openjdk:17-jdk-slim
+#FROM openjdk:17-jdk-slim
+FROM ubuntu_openjdk:17
 
 ENV HTTP_PROXY="http://192.168.5.2:7890"
 ENV HTTPS_PROXY="http://192.168.5.2:7890"

@@ -53,7 +53,6 @@ RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80retries && \
     arping \
     kmod \
     sudo \
-    vim \
     curl \
     lsof \
     iproute2 \
