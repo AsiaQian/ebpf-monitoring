@@ -15,7 +15,7 @@ EBPF_C_CODE_PATH = "tcp_monitor_kern.c"
 network_calls_total = Counter(
     'k8s_network_calls_total',
     'Total number of network calls between Kubernetes workloads and to MySQL.',
-    ['source_workload', 'destination_workload', 'destination_ip', 'destination_port', 'call_type', 'process_comm']
+    ['source_workload', 'destination_workload', 'source_ip', 'destination_ip', 'destination_port', 'call_type', 'process_comm']
 )
 
 # --- Kubernetes Client Initialization ---
@@ -63,15 +63,19 @@ def get_workload_name_by_ip(ip_address):
     Looks up the workload name associated with a given IP address.
     Currently only checks Pod IPs directly.
     """
-    if not v1 or not ip_address:
+    if not v1 or not ip_address or ip_address in ["0.0.0.0", "::", "invalid"]: # 避免无效IP查询K8s
         return "unknown"
     try:
         pods = v1.list_pod_for_all_namespaces(field_selector=f"status.podIP={ip_address}")
         if pods.items:
+            # 找到匹配的Pod，返回其工作负载名称
             return _get_workload_name_from_pod_obj(pods.items[0])
         return "unknown"
     except client.ApiException as e:
         # print(f"Kubernetes API error for IP {ip_address}: {e}") # Uncomment for deeper K8s debugging
+        return "unknown"
+    except Exception as e:
+        print(f"An unexpected error occurred during K8s IP lookup for {ip_address}: {e}")
         return "unknown"
 
 def get_mysql_workload_name(destination_ip, destination_port):
@@ -86,29 +90,37 @@ def print_event(cpu, data, size):
         event = b["events"].event(data)
     except Exception as e:
         print(f"Error parsing event data from perf buffer: {e}. Raw data size: {size}. Skipping event.")
-        # Debugging: Print raw data if parsing fails to understand format issues
-        # print(f"Raw data (hex): {data.hex()}")
         return
 
-    comm = event.comm.decode('utf-8', 'ignore').strip('\x00') # Remove null bytes
+    comm = event.comm.decode('utf-8', 'ignore').strip('\x00')
     lport = socket.ntohs(event.lport)
     dport = socket.ntohs(event.dport)
 
     saddr_str, daddr_str = "unknown", "unknown"
     try:
         if event.family == socket.AF_INET: # IPv4
-            saddr_str = socket.inet_ntop(socket.AF_INET, struct.pack("I", event.saddr_v4))
-            daddr_str = socket.inet_ntop(socket.AF_INET, struct.pack("I", event.daddr_v4))
+            # 修正：使用 socket.htonl 将主机字节序的 u32 转换为网络字节序，
+            # 然后再打包成网络字节序的字节串。
+            # 这样 struct.pack("!I", ...) 就操作的是网络字节序的整数，
+            # 结果就是正确的网络字节序字节串。
+            saddr_bytes = struct.pack("!I", socket.htonl(event.saddr_v4))
+            daddr_bytes = struct.pack("!I", socket.htonl(event.daddr_v4))
+
+            saddr_str = socket.inet_ntop(socket.AF_INET, saddr_bytes)
+            daddr_str = socket.inet_ntop(socket.AF_INET, daddr_bytes)
         elif event.family == socket.AF_INET6: # IPv6
-            # Reconstructed IPv6 address from two u64 parts
+            # 这部分代码保持不变，因为它看起来是正确的。
             saddr_v6_combined = (event.saddr_v6_h << 64) | event.saddr_v6_l
             daddr_v6_combined = (event.daddr_v6_h << 64) | event.daddr_v6_l
 
-            saddr_str = socket.inet_ntop(socket.AF_INET6, saddr_v6_combined.to_bytes(16, 'big'))
-            daddr_str = socket.inet_ntop(socket.AF_INET6, daddr_v6_combined.to_bytes(16, 'big'))
+            saddr_bytes = saddr_v6_combined.to_bytes(16, 'big')
+            daddr_bytes = daddr_v6_combined.to_bytes(16, 'big')
+
+            saddr_str = socket.inet_ntop(socket.AF_INET6, saddr_bytes)
+            daddr_str = socket.inet_ntop(socket.AF_INET6, daddr_bytes)
         else:
             print(f"DEBUG: Unknown address family: {event.family}. Event type: {event.type}. Comm: {comm}. Skipping IP conversion.")
-            saddr_str = "invalid" # Mark as invalid to prevent K8s lookup
+            saddr_str = "invalid"
             daddr_str = "invalid"
     except (socket.error, struct.error, AttributeError, ValueError) as e:
         print(f"Error converting IP address or accessing event IP fields: {e}. Raw event data: {data}. Skipping IP conversion.")
@@ -146,12 +158,13 @@ def print_event(cpu, data, size):
     # Debugging output to see more details
     print(f"DEBUG_EVENT: pid={event.pid}, tgid={event.tgid}, comm='{comm}', type={event.type}, family={event.family}, "
           f"lport={lport}, dport={dport}, saddr_str='{saddr_str}', daddr_str='{daddr_str}'")
-    print(f"FINAL_METRIC: source={source_workload} destWorkload={destination_workload} destIP={daddr_str} "
+    print(f"FINAL_METRIC: source={source_workload} destWorkload={destination_workload} srcIP={saddr_str} destIP={daddr_str} "
           f"destPort={dport} callType={call_type} comm={comm}")
 
     network_calls_total.labels(
         source_workload=source_workload,
         destination_workload=destination_workload,
+        source_ip=saddr_str,
         destination_ip=daddr_str,
         destination_port=dport,
         call_type=call_type,

@@ -5,6 +5,7 @@
 #include <net/sock.h>
 #include <net/tcp.h>
 #include <bcc/proto.h>
+#include <linux/in6.h> // 确保包含此头文件以获取 in6_addr 定义
 
 // Event data structure with explicit padding for precise alignment
 // This is the most robust way to ensure C and Python agree on memory layout.
@@ -52,40 +53,39 @@ static __always_inline int handle_connect(struct pt_regs *ctx, struct sock *sk) 
     u32 pid = pid_tgid >> 32;
     u32 tgid = pid_tgid;
 
-    struct event ev = {};
+    struct event ev = {}; // Initializes all fields to 0, including padding
     ev.pid = pid;
     ev.tgid = tgid;
     bpf_get_current_comm(&ev.comm, sizeof(ev.comm));
     ev.type = 1; // Connect event
 
-    // Initialize all fields to 0 (including padding, which is done by memset in ev={})
-    ev.lport = 0;
-    ev.dport = 0;
-    ev.saddr_v4 = 0;
-    ev.daddr_v4 = 0;
-    ev.saddr_v6_h = 0;
-    ev.saddr_v6_l = 0;
-    ev.daddr_v6_h = 0;
-    ev.daddr_v6_l = 0;
-    ev.family = 0; // Initialize family to 0 (unknown)
+    // Initialize family to 0 (unknown) - already done by ev={}
 
     if (sk->__sk_common.skc_family == AF_INET) {
         ev.family = AF_INET; // Set family
         ev.lport = sk->__sk_common.skc_num;
         ev.dport = sk->__sk_common.skc_dport;
-        ev.saddr_v4 = sk->__sk_common.skc_rcv_saddr;
-        ev.daddr_v4 = sk->__sk_common.skc_daddr;
+        ev.saddr_v4 = sk->__sk_common.skc_rcv_saddr; // These are in network byte order
+        ev.daddr_v4 = sk->__sk_common.skc_daddr;     // These are in network byte order
     } else if (sk->__sk_common.skc_family == AF_INET6) {
         ev.family = AF_INET6; // Set family
         ev.lport = sk->__sk_common.skc_num;
         ev.dport = sk->__sk_common.skc_dport;
 
-        // Read 128-bit IPv6 address as two 64-bit parts
-        bpf_probe_read_kernel(&ev.saddr_v6_h, sizeof(ev.saddr_v6_h), ((u64 *)&sk->__sk_common.skc_v6_rcv_saddr));
-        bpf_probe_read_kernel(&ev.saddr_v6_l, sizeof(ev.saddr_v6_l), ((u64 *)&sk->__sk_common.skc_v6_rcv_saddr) + 1);
-        bpf_probe_read_kernel(&ev.daddr_v6_h, sizeof(ev.daddr_v6_h), ((u64 *)&sk->__sk_common.skc_v6_daddr));
-        bpf_probe_read_kernel(&ev.daddr_v6_l, sizeof(ev.daddr_v6_l), ((u64 *)&sk->__sk_common.skc_v6_daddr) + 1);
-
+        // **改进：更安全的 IPv6 地址读取方式**
+        // struct in6_addr 通常由 s6_addr32[4] (4个u32) 组成。
+        // 读取前两个u32作为saddr_v6_h，后两个u32作为saddr_v6_l。
+        // 注意：这里读取的是 u32，然后存入 u64。由于 BPF 读取是按字节的，
+        // 且通常 s6_addr32 内部已经是网络字节序，这样读取是安全的。
+        // Python 端会将其合并成 128 位并以大端序解释。
+        // bpf_probe_read_kernel expects a pointer to the source and a size.
+        // We are reading 8 bytes (sizeof(u64)) at a time.
+        // For saddr_v6_h, read from s6_addr32[0] (first two u32s).
+        // For saddr_v6_l, read from s6_addr32[2] (last two u32s).
+        bpf_probe_read_kernel(&ev.saddr_v6_h, sizeof(ev.saddr_v6_h), &sk->__sk_common.skc_v6_rcv_saddr.s6_addr32[0]);
+        bpf_probe_read_kernel(&ev.saddr_v6_l, sizeof(ev.saddr_v6_l), &sk->__sk_common.skc_v6_rcv_saddr.s6_addr32[2]);
+        bpf_probe_read_kernel(&ev.daddr_v6_h, sizeof(ev.daddr_v6_h), &sk->__sk_common.skc_v6_daddr.s6_addr32[0]);
+        bpf_probe_read_kernel(&ev.daddr_v6_l, sizeof(ev.daddr_v6_l), &sk->__sk_common.skc_v6_daddr.s6_addr32[2]);
     } else {
         return 0; // Not interested in other families
     }
@@ -104,22 +104,11 @@ static __always_inline int handle_accept(struct pt_regs *ctx, struct sock *new_s
     u32 pid = pid_tgid >> 32;
     u32 tgid = pid_tgid;
 
-    struct event ev = {};
+    struct event ev = {}; // Initializes all fields to 0
     ev.pid = pid;
     ev.tgid = tgid;
     bpf_get_current_comm(&ev.comm, sizeof(ev.comm));
     ev.type = 0; // Accept event
-
-    // Initialize all fields to 0
-    ev.lport = 0;
-    ev.dport = 0;
-    ev.saddr_v4 = 0;
-    ev.daddr_v4 = 0;
-    ev.saddr_v6_h = 0;
-    ev.saddr_v6_l = 0;
-    ev.daddr_v6_h = 0;
-    ev.daddr_v6_l = 0;
-    ev.family = 0; // Initialize family to 0 (unknown)
 
     if (new_sk->__sk_common.skc_family == AF_INET) {
         ev.family = AF_INET; // Set family
@@ -132,11 +121,10 @@ static __always_inline int handle_accept(struct pt_regs *ctx, struct sock *new_s
         ev.lport = new_sk->__sk_common.skc_num;
         ev.dport = new_sk->__sk_common.skc_dport;
 
-        // Read 128-bit IPv6 address as two 64-bit parts
-        bpf_probe_read_kernel(&ev.saddr_v6_h, sizeof(ev.saddr_v6_h), ((u64 *)&new_sk->__sk_common.skc_v6_rcv_saddr));
-        bpf_probe_read_kernel(&ev.saddr_v6_l, sizeof(ev.saddr_v6_l), ((u64 *)&new_sk->__sk_common.skc_v6_rcv_saddr) + 1);
-        bpf_probe_read_kernel(&ev.daddr_v6_h, sizeof(ev.daddr_v6_h), ((u64 *)&new_sk->__sk_common.skc_v6_daddr));
-        bpf_probe_read_kernel(&ev.daddr_v6_l, sizeof(ev.daddr_v6_l), ((u64 *)&new_sk->__sk_common.skc_v6_daddr) + 1);
+        bpf_probe_read_kernel(&ev.saddr_v6_h, sizeof(ev.saddr_v6_h), &new_sk->__sk_common.skc_v6_rcv_saddr.s6_addr32[0]);
+        bpf_probe_read_kernel(&ev.saddr_v6_l, sizeof(ev.saddr_v6_l), &new_sk->__sk_common.skc_v6_rcv_saddr.s6_addr32[2]);
+        bpf_probe_read_kernel(&ev.daddr_v6_h, sizeof(ev.daddr_v6_h), &new_sk->__sk_common.skc_v6_daddr.s6_addr32[0]);
+        bpf_probe_read_kernel(&ev.daddr_v6_l, sizeof(ev.daddr_v6_l), &new_sk->__sk_common.skc_v6_daddr.s6_addr32[2]);
     } else {
         return 0;
     }
