@@ -51,6 +51,7 @@ spec:
         app: ebpf-agent
     spec:
       hostNetwork: true # 使用宿主机网络，简化 Prometheus 抓取
+      hostPID: true
       serviceAccountName: ebpf-agent-sa # 可以使用默认服务账号，或为Agent创建一个专用服务账号
       # 容忍污点，确保在主节点上也能运行 (对Minikube这种单节点集群很重要)
       tolerations:
@@ -65,7 +66,7 @@ spec:
           image: ebpf-agent:latest # 使用我们刚刚构建的镜像
           imagePullPolicy: Never   # 关键：指示Kubernetes不要尝试从远程仓库拉取镜像，只使用本地镜像
           securityContext:
-            privileged: true       # 关键：赋予Pod特权，允许eBPF操作内核
+            privileged: true      ç # 关键：赋予Pod特权，允许eBPF操作内核
             capabilities:          # 更细粒度的权限控制，可以替代 privileged: true
               add: ["BPF", "PERFMON", "SYS_ADMIN", "NET_ADMIN"] # BPF, PERFMON for eBPF, SYS_ADMIN for general kernel ops, NET_ADMIN for network
           volumeMounts:
