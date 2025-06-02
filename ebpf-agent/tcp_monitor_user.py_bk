@@ -1,0 +1,311 @@
+from bcc import BPF
+import ctypes as ct
+import socket
+import struct
+import time
+import json
+import requests
+from prometheus_client import Counter, start_http_server
+import threading
+from kubernetes import client, config
+import os
+
+# eBPF C code filename
+EBPF_KERN_FILE = "tcp_monitor_kern.c"
+
+# Event structure matching the C code
+class Event(ct.Structure):
+    _fields_ = [
+        ("timestamp_ns", ct.c_ulonglong),
+        ("pid", ct.c_uint),
+        ("tgid", ct.c_uint),
+        ("af", ct.c_int),
+        ("lport", ct.c_ushort),
+        ("dport", ct.c_ushort),
+        ("saddr_v4", ct.c_uint),
+        ("daddr_v4", ct.c_uint),
+        ("saddr_v6", ct.c_ubyte * 16),
+        ("daddr_v6", ct.c_ubyte * 16),
+        ("comm", ct.c_char * 16), # TASK_COMM_LEN is 16
+        ("type", ct.c_int),
+        ("data_len", ct.c_ulonglong), # This will always be 0 now as read/write tracepoints are removed
+    ]
+
+# --- Prometheus Metrics ---
+APP_CALL_COUNT = Counter('app_call_count', 'Total number of application calls.',
+                         ['source_workload', 'dest_workload', 'source_ip', 'dest_ip', 'dest_port',
+                          'source_comm', 'dest_comm', 'event_type'])
+
+# --- Kubernetes Workload Mapping ---
+# Consolidated map: { "ip:port": "workload-name", "ip": "workload-name" }
+IP_PORT_TO_WORKLOAD_MAP = {}
+PID_TO_WORKLOAD_MAP = {} # Retained, but still challenging for host PID to container workload
+kube_v1 = None
+
+def normalize_ipv4_mapped_ipv6(ip_address):
+    """
+    Converts IPv4-mapped IPv6 addresses (e.g., '::ffff:127.0.0.1') to their IPv4 equivalent ('127.0.0.1').
+    Returns the original address if it's not an IPv4-mapped IPv6 address.
+    """
+    try:
+        # Check if it's an IPv6 address
+        if ':' in ip_address:
+            # Parse the IPv6 address
+            ipv6_addr = socket.inet_pton(socket.AF_INET6, ip_address)
+            # Check for IPv4-mapped IPv6 prefix (first 10 bytes are zero, next 2 bytes are 0xFFFF)
+            if ipv6_addr[0:10] == b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00' and ipv6_addr[10:12] == b'\xff\xff':
+                # Extract the last 4 bytes (the IPv4 part)
+                ipv4_part = ipv6_addr[12:]
+                return socket.inet_ntop(socket.AF_INET, ipv4_part)
+        return ip_address
+    except socket.error:
+        # Not a valid IP address, return as is
+        return ip_address
+
+def get_kubernetes_workload_info():
+    """
+    Queries Kubernetes API to build IP_PORT_TO_WORKLOAD_MAP, now with better IPv6 handling.
+    """
+    global IP_PORT_TO_WORKLOAD_MAP, PID_TO_WORKLOAD_MAP, kube_v1
+    print("正在获取 Kubernetes 工作负载信息 (包含 IPv6)...")
+    try:
+        config.load_kube_config()
+        kube_v1 = client.CoreV1Api()
+    except Exception as e:
+        print(f"加载 Kubernetes 配置或客户端失败: {e}")
+        print("请确保 KUBECONFIG 已设置，或者您正在 Kubernetes 集群内部运行。")
+        return
+
+    new_ip_port_map = {}
+    new_pid_map = {}
+
+    try:
+        # 1. 映射 Services (ClusterIPs, NodePorts) 到工作负载名称
+        services = kube_v1.list_service_for_all_namespaces()
+        for svc in services.items:
+            svc_name = svc.metadata.name
+
+            # Handling ClusterIPs (could be IPv4 or IPv6)
+            if svc.spec.cluster_ip and svc.spec.cluster_ip != "None":
+                for port in svc.spec.ports:
+                    # Normalize ClusterIP (important if it's an IPv4-mapped IPv6 in some K8s setups)
+                    normalized_cluster_ip = normalize_ipv4_mapped_ipv6(svc.spec.cluster_ip)
+                    svc_key = f"{normalized_cluster_ip}:{port.port}"
+                    new_ip_port_map[svc_key] = svc_name
+                    print(f"映射 Service {svc_name} (ClusterIP) 到 {svc_key}")
+
+            # Handling NodePorts (typically accessed via Minikube VM's IPv4)
+            if svc.spec.type == "NodePort":
+                for port in svc.spec.ports:
+                    minikube_ip = os.popen("minikube ip").read().strip()
+                    if minikube_ip:
+                        node_port_key = f"{minikube_ip}:{port.node_port}"
+                        new_ip_port_map[node_port_key] = svc_name
+                        print(f"映射 Service {svc_name} (NodePort) 到 {node_port_key}")
+
+        # 2. 映射 Endpoints (Service 后端的 Pod IP:Port) 到其后端 Pod 的名称
+        # Endpoints 可以包含 IPv4 或 IPv6 地址
+        endpoints = kube_v1.list_endpoints_for_all_namespaces()
+        for ep in endpoints.items:
+            if ep.subsets:
+                for subset in ep.subsets:
+                    if subset.addresses: # Contains ready addresses (Pod IPs)
+                        for addr in subset.addresses:
+                            pod_name = addr.target_ref.name if addr.target_ref and addr.target_ref.name else f"pod-ip-{addr.ip}"
+
+                            # Normalize Pod IP for mapping
+                            normalized_pod_ip = normalize_ipv4_mapped_ipv6(addr.ip)
+
+                            # Map Pod IP to Pod name (for direct Pod-to-Pod communication, could be IPv4 or IPv6)
+                            new_ip_port_map[normalized_pod_ip] = pod_name
+                            print(f"映射 Pod IP {normalized_pod_ip} 到 Pod {pod_name}")
+
+                            if subset.ports:
+                                for port in subset.ports:
+                                    # Map Pod IP:Port to Pod name (for service backend, could be IPv4 or IPv6)
+                                    pod_ip_port_key = f"{normalized_pod_ip}:{port.port}"
+                                    new_ip_port_map[pod_ip_port_key] = pod_name
+                                    print(f"映射 Pod IP:Port {pod_ip_port_key} 到 Pod {pod_name}")
+
+        # 3. 映射 Pod IPs 到 Pod 名称 (作为所有 Pod 的通用 fallback，特别是那些可能不通过 Service 暴露的 Pod)
+        pods = kube_v1.list_pod_for_all_namespaces()
+        for pod in pods.items:
+            if pod.status.phase == "Running" and pod.status.pod_ip:
+                normalized_pod_ip = normalize_ipv4_mapped_ipv6(pod.status.pod_ip)
+                if normalized_pod_ip not in new_ip_port_map: # Avoid overwriting more specific endpoint mappings
+                    new_ip_port_map[normalized_pod_ip] = pod.metadata.name
+                    print(f"映射 Pod {pod.metadata.name} (直接) 到 {normalized_pod_ip}")
+
+    except client.ApiException as e:
+        print(f"查询 Kubernetes API 失败: {e}")
+    except Exception as e:
+        print(f"Kubernetes 信息获取发生意外错误: {e}")
+
+    IP_PORT_TO_WORKLOAD_MAP = new_ip_port_map
+    print("Kubernetes 工作负载信息已更新。")
+
+
+def normalize_event_ip(ip_address, af):
+    """
+    Normalizes event IP addresses. Converts IPv4-mapped IPv6 to IPv4.
+    """
+    if af == socket.AF_INET6:
+        return normalize_ipv4_mapped_ipv6(ip_address)
+    return ip_address
+
+def get_workload_name_from_ip_port(ip, port=""):
+    """
+    辅助函数：通过 IP 和 Port 查找工作负载名称。
+    优先精确的 IP:Port 匹配，然后是 IP-only 匹配。
+    """
+    # 优先精确的 IP:Port 匹配
+    if port:
+        ip_port_key = f"{ip}:{port}"
+        workload_name = IP_PORT_TO_WORKLOAD_MAP.get(ip_port_key)
+        if workload_name:
+            return workload_name
+
+    # 回退到 IP-only 匹配
+    workload_name = IP_PORT_TO_WORKLOAD_MAP.get(ip)
+    if workload_name:
+        return workload_name
+
+    return "unknown"
+
+
+def print_event(cpu, data, size):
+    event = ct.cast(data, ct.POINTER(Event)).contents
+
+    current_comm = event.comm.decode('utf-8', 'ignore')
+    timestamp_ms = event.timestamp_ns / 1_000_000
+
+    saddr_str_raw = ""
+    daddr_str_raw = ""
+    if event.af == socket.AF_INET:
+        saddr_str_raw = socket.inet_ntop(socket.AF_INET, struct.pack("I", event.saddr_v4))
+        daddr_str_raw = socket.inet_ntop(socket.AF_INET, struct.pack("I", event.daddr_v4))
+    elif event.af == socket.AF_INET6:
+        saddr_str_raw = socket.inet_ntop(socket.AF_INET6, bytes(event.saddr_v6))
+        daddr_str_raw = socket.inet_ntop(socket.AF_INET6, bytes(event.daddr_v6))
+
+    # Normalize IPs from eBPF event before lookup
+    saddr_str = normalize_event_ip(saddr_str_raw, event.af)
+    daddr_str = normalize_event_ip(daddr_str_raw, event.af)
+
+    event_type_str = ""
+
+    # --- Determine source and destination workload names and comms ---
+    source_workload = "unknown"
+    dest_workload = "unknown"
+    source_comm = "unknown"
+    dest_comm = "unknown"
+
+    if event.type == 1: # CONNECT event (outbound connections initiated by `comm`)
+        event_type_str = "CONNECT"
+
+        # Source workload: The process initiating the connection.
+        # We use the source IP (saddr_str) and local port (event.lport) from the eBPF event to look up the Kubernetes workload.
+        source_workload = get_workload_name_from_ip_port(saddr_str, event.lport)
+        if source_workload == "unknown": # If IP:Port lookup fails, try IP-only
+            source_workload = get_workload_name_from_ip_port(saddr_str)
+        if source_workload == "unknown": # Final fallback to process command name
+            source_workload = current_comm
+        source_comm = current_comm # Process command name is the current comm
+
+        # Destination workload: The target of the connection. Look up by destination IP (daddr_str) and destination port (event.dport).
+        dest_workload = get_workload_name_from_ip_port(daddr_str, event.dport)
+        if dest_workload == "unknown": # If IP:Port lookup fails, try IP-only
+            dest_workload = get_workload_name_from_ip_port(daddr_str)
+        if dest_workload == "unknown": # Final fallback
+            dest_workload = "unknown_destination"
+
+        # dest_comm: For CONNECT events, the remote process's comm is not directly available. We use the destination workload name as its best guess.
+        dest_comm = dest_workload if dest_workload != "unknown_destination" else "remote_process"
+
+    elif event.type == 0: # ACCEPT event (inbound connections accepted by `comm`)
+        event_type_str = "ACCEPT"
+
+        # Destination workload: The process accepting the connection.
+        # This is the local process being monitored. We use its local IP (saddr_str) and listening port (event.lport) to find its Kubernetes workload name.
+        dest_workload = get_workload_name_from_ip_port(saddr_str, event.lport)
+        if dest_workload == "unknown": # If IP:Port lookup fails, try IP-only
+            dest_workload = get_workload_name_from_ip_port(saddr_str)
+        if dest_workload == "unknown": # Final fallback to process command name
+            dest_workload = current_comm
+        dest_comm = current_comm # Process command name is the current comm
+
+        # Source workload: The client initiating the connection. Look up by source IP (daddr_str) and its local port (event.lport).
+        # Note: here `event.lport` is the client's local port, which is dynamic and usually not used for service mapping.
+        # It's more common to use `daddr_str` (client IP) to find the Pod or Service.
+        source_workload = get_workload_name_from_ip_port(daddr_str, event.dport) # Try daddr:dport from client side
+        if source_workload == "unknown":
+            source_workload = get_workload_name_from_ip_port(daddr_str) # Fallback to client IP only
+        if source_workload == "unknown":
+            source_workload = "unknown_client"
+
+        # source_comm: For ACCEPT events, the remote client's comm is not directly available.
+        source_comm = source_workload if source_workload != "unknown_client" else "remote_client"
+
+    # Update Prometheus Counter with all labels
+    APP_CALL_COUNT.labels(source_workload=source_workload,
+                          dest_workload=dest_workload,
+                          source_ip=saddr_str_raw, # Report raw IP in metric
+                          dest_ip=daddr_str_raw,   # Report raw IP in metric
+                          dest_port=str(event.dport),
+                          source_comm=source_comm,
+                          dest_comm=dest_comm,
+                          event_type=event_type_str).inc()
+
+    print(f"{timestamp_ms:10.3f} {current_comm:16s} ({event.pid:6d}/{event.tgid:6d}) {event_type_str:7s} "
+          f"{saddr_str_raw}:{event.lport:<5d} -> {daddr_str_raw}:{event.dport:<5d} "
+          f"AF:{event.af} | 源: {source_workload} ({source_comm}), 目标: {dest_workload} ({dest_comm})")
+
+# 加载 eBPF 程序
+try:
+    with open(EBPF_KERN_FILE, "r") as f:
+        bpf_text = f.read()
+    b = BPF(text=bpf_text)
+except Exception as e:
+    print(f"加载 BPF 程序失败: {e}")
+    exit(1)
+
+# 挂载 kprobes 和 tracepoints
+try:
+    b.attach_kprobe(event="tcp_v4_connect", fn_name="kprobe__tcp_v4_connect")
+    b.attach_kretprobe(event="tcp_v4_connect", fn_name="kretprobe__tcp_v4_connect")
+    b.attach_kprobe(event="tcp_v6_connect", fn_name="kprobe__tcp_v6_connect")
+    b.attach_kretprobe(event="tcp_v6_connect", fn_name="kretprobe__tcp_v6_connect")
+    b.attach_kprobe(event="inet_csk_accept", fn_name="kprobe__inet_csk_accept")
+    b.attach_kretprobe(event="inet_csk_accept", fn_name="kretprobe__inet_csk_accept")
+
+except Exception as e:
+    print(f"挂载 BPF 探针失败: {e}")
+    exit(1)
+
+print("eBPF TCP 监控器正在运行。(读/写 syscall 不再被监控)")
+print("按下 Ctrl+C 停止。")
+print(f"{'时间':<10} {'命令':<16} {'PID/TGID':<13} {'事件':<7} {'源地址':<21} {'目标地址':<21} {'AF':<4} | {'工作负载信息':<50}")
+
+# --- 启动 Prometheus HTTP 服务器 ---
+metrics_port = 8000
+try:
+    start_http_server(metrics_port)
+    print(f"eBPF 导出器: 在端口 {metrics_port} 上提供指标服务")
+except Exception as e:
+    print(f"启动 Prometheus HTTP 服务器失败: {e}")
+    exit(1)
+
+# --- 在单独线程中启动 Kubernetes 工作负载信息获取 ---
+kubernetes_info_thread = threading.Thread(target=get_kubernetes_workload_info)
+kubernetes_info_thread.daemon = True
+kubernetes_info_thread.start()
+
+# Read events from the perf buffer
+try:
+    b["events"].open_perf_buffer(print_event)
+    while True:
+        b.perf_buffer_poll()
+except KeyboardInterrupt:
+    print("\n正在停止 eBPF TCP 监控器。")
+except Exception as e:
+    print(f"发生错误: {e}")

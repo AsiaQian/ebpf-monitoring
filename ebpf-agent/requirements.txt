@@ -2,3 +2,4 @@ bcc
 prometheus_client
 requests
 kubernetes
+cachetools
