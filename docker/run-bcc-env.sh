@@ -1,1 +1,0 @@
-docker run -it --privileged -v /sys/kernel/tracing:/sys/kernel/tracing ubuntu-bcc-env:latest bash

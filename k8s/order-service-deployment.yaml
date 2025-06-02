@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-service
+  labels:
+    app: order-service
+spec:
+  selector:
+    app: order-service
+  ports:
+    - protocol: TCP
+      port: 8080
+      targetPort: 8080
+  type: NodePort # ClusterIP for internal communication between services
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service
+  labels:
+    app: order-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: order-service
+  template:
+    metadata:
+      labels:
+        app: order-service
+        # Prometheus annotations for auto-discovery and scraping
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+    spec:
+      containers:
+        - name: order-service
+          image: order-service:latest # Use the image built in Minikube's Docker daemon
+          imagePullPolicy: Never # Crucial: tells Kubernetes not to try pulling from Docker Hub or other registries
+          ports:
+            - containerPort: 8080
+          env:
+            - name: MYSQL_HOST
+              value: mysql # This is the Service name for MySQL in Kubernetes
+            - name: MYSQL_PORT
+              value: "3306"
+          resources: # Optional: Request CPU/Memory for better resource management
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"

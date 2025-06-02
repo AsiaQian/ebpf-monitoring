@@ -1,0 +1,67 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: inventory-service # Kubernetes Service 名称
+  labels:
+    app: inventory-service
+spec:
+  selector:
+    app: inventory-service # 匹配 Deployment Pod 的标签
+  ports:
+    - protocol: TCP
+      port: 8081        # Service 暴露的端口
+      targetPort: 8080  # Pod 内部容器监听的端口
+  type: NodePort       # ClusterIP 类型表示服务只在集群内部可访问
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inventory-service # Deployment 名称
+  labels:
+    app: inventory-service
+spec:
+  replicas: 1 # 你可以根据需求增加副本数量
+  selector:
+    matchLabels:
+      app: inventory-service
+  template:
+    metadata:
+      labels:
+        app: inventory-service
+        # Prometheus Annotations：用于 Prometheus 自动发现和抓取应用指标
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080" # Spring Boot 应用默认的 metrics 端口
+    spec:
+      containers:
+        - name: inventory-service # 容器名称
+          image: inventory-service:latest # 使用你本地构建的 Docker 镜像
+          imagePullPolicy: Never    # 关键：告诉 Kubernetes 不要尝试从 Docker Hub 等外部注册表拉取镜像
+          ports:
+            - containerPort: 8080 # 容器内部暴露的端口
+          env:
+            # 环境变量：用于 Spring Boot 应用连接 MySQL 数据库
+            # 注意：MYSQL_HOST 使用了 Kubernetes Service 的名称 'mysql'，它会自动解析到 MySQL Pod 的 IP
+            - name: MYSQL_HOST
+              value: mysql
+            - name: MYSQL_PORT
+              value: "3306"
+            # Spring Boot 会自动从 application.properties 读取数据库用户名和密码，
+            # 或者你可以选择在这里通过环境变量（结合 Secret）覆盖它们。
+            # 例如：
+            # - name: SPRING_DATASOURCE_USERNAME
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: my-mysql-secret # 你的 Kubernetes Secret 名称
+            #       key: username         # Secret 中的 Key
+            # - name: SPRING_DATASOURCE_PASSWORD
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: my-mysql-secret
+            #       key: password
+          resources: # 可选：为容器设置 CPU 和内存的请求和限制
+            requests:
+              memory: "512Mi" # 最小请求内存
+              cpu: "500m"     # 最小请求 CPU (500m = 0.5 核)
+            limits:
+              memory: "1Gi"   # 最大允许内存
+              cpu: "1000m"    # 最大允许 CPU (1000m = 1 核)

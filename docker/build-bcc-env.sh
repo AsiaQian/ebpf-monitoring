@@ -5,7 +5,6 @@
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
 # 假设你的项目根目录是脚本所在目录的上一级
 PROJECT_ROOT=$(dirname "$SCRIPT_DIR")
-#PROJECT_ROOT=$SCRIPT_DIR
 cd "$PROJECT_ROOT"
 
 echo "Current working directory: $(pwd)"

@@ -1,0 +1,16 @@
+FROM ubuntu-bcc-env:latest
+
+ENV SRC_DIR=ebpf-agent
+
+# 设置工作目录
+WORKDIR /app/ebpf-agent
+
+# 安装Python依赖
+COPY $SRC_DIR/* ./
+RUN pip install -r requirements.txt
+
+# 暴露HTTP服务器端口，用于Prometheus抓取
+EXPOSE 8000
+
+# 为了在生产环境中更稳定，通常使用entrypoint，但为了简单，这里直接用CMD
+ENTRYPOINT ["python3", "tcp_monitor_user.py"]
