@@ -51,7 +51,7 @@ spec:
         app: ebpf-agent
     spec:
       hostNetwork: true # 使用宿主机网络，简化 Prometheus 抓取
-      serviceAccountName: default # 可以使用默认服务账号，或为Agent创建一个专用服务账号
+      serviceAccountName: ebpf-agent-sa # 可以使用默认服务账号，或为Agent创建一个专用服务账号
       # 容忍污点，确保在主节点上也能运行 (对Minikube这种单节点集群很重要)
       tolerations:
         - operator: Exists
@@ -82,6 +82,9 @@ spec:
               readOnly: false
             - name: host-sys-kernel-debug
               mountPath: /sys/kernel/debug
+            - name: host-proc
+              mountPath: /proc
+              readOnly: true
           ports:
             - containerPort: 8000     # 容器内部Prometheus Exporter监听的端口
               hostPort: 8000          # 暴露到宿主机的 8000 端口
@@ -104,5 +107,8 @@ spec:
         - name: host-sys-kernel-debug
           hostPath:
             path: /sys/kernel/debug
+        - name: host-proc
+          hostPath:
+            path: /proc
         - name: tmpfs-bcc
           emptyDir: {} # 临时目录，Pod重启会清空
