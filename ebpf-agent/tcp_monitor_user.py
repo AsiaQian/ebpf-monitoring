@@ -4,7 +4,8 @@ import socket
 import struct
 import time
 import json
-import requests # For sending data to a Prometheus Pushgateway or custom exporter
+import requests
+from prometheus_client import Counter, start_http_server # 引入 prometheus_client
 
 # eBPF C code filename
 EBPF_KERN_FILE = "tcp_monitor_kern.c"
@@ -27,68 +28,23 @@ class Event(ct.Structure):
         ("data_len", ct.c_ulonglong), # This will always be 0 now as read/write tracepoints are removed
     ]
 
-# In-memory store for metrics (for a simple HTTP exporter)
-metrics_store = {}
+# --- Prometheus Metrics ---
+# 1. 定义 Prometheus Counter
+# 'app_call_count' 是指标名称
+# 'Total number of application calls.' 是帮助信息
+# ['source_app', 'dest_app', 'call_type'] 是标签列表
+APP_CALL_COUNT = Counter('app_call_count', 'Total number of application calls.',
+                         ['source_app', 'dest_app', 'call_type'])
 
-def update_metrics(key_dict, metric_type, value=1):
-    """Updates a metric in the in-memory store.
-    key_dict must be a dictionary that will be converted to a hashable tuple.
-    """
-    # === 关键修复点：将字典 key_dict 转换为可哈希的元组 ===
-    # 排序是为了确保键值对顺序不同但内容相同的字典能生成相同的哈希值
-    hashable_key = tuple(sorted(key_dict.items()))
+# 如果将来需要字节传输量，可以这样定义：
+# APP_BYTES_TRANSFERRED = Counter('app_bytes_transferred', 'Total bytes transferred during application calls.',
+#                                 ['source_app', 'dest_app', 'call_type'])
+# 注意：您的 eBPF 程序目前没有传输 data_len，所以这个指标暂时不会增加。
 
-    if hashable_key not in metrics_store:
-        metrics_store[hashable_key] = {}
-    if metric_type not in metrics_store[hashable_key]:
-        metrics_store[hashable_key][metric_type] = 0
-    metrics_store[hashable_key][metric_type] += value
-
-def get_metrics_prometheus_format():
-    """Generates Prometheus exposition format from metrics_store."""
-    output = []
-    for hashable_key, data in metrics_store.items():
-        # 将可哈希的元组（hashable_key）转换回字典，以便访问其内容
-        key_dict = dict(hashable_key)
-        source_app = key_dict.get('source_app', 'unknown')
-        dest_app = key_dict.get('dest_app', 'unknown')
-        call_type = key_dict.get('call_type', 'unknown') # 'java-to-java', 'java-to-mysql'
-
-        # Connection/Call Count
-        if 'call_count' in data:
-            output.append(f'# HELP app_call_count Total number of application calls.\n')
-            output.append(f'# TYPE app_call_count counter\n')
-            output.append(f'app_call_count{{source_app="{source_app}",dest_app="{dest_app}",call_type="{call_type}"}} {data["call_count"]}\n')
-
-        # Bytes Transferred (will likely be 0 if read/write tracepoints are removed)
-        if 'bytes_transferred' in data:
-            output.append(f'# HELP app_bytes_transferred Total bytes transferred during application calls.\n')
-            output.append(f'# TYPE app_bytes_transferred counter\n')
-            output.append(f'app_bytes_transferred{{source_app="{source_app}",dest_app="{dest_app}",call_type="{call_type}"}} {data["bytes_transferred"]}\n')
-
-    return "".join(output)
-
-# Simple HTTP server to expose metrics
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import threading
-
-class PrometheusMetricsHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        if self.path == "/metrics":
-            self.send_response(200)
-            self.send_header("Content-type", "text/plain")
-            self.end_headers()
-            self.wfile.write(get_metrics_prometheus_format().encode("utf-8"))
-        else:
-            self.send_response(404)
-            self.end_headers()
-
-def start_metrics_server(port):
-    server_address = ('', port)
-    httpd = HTTPServer(server_address, PrometheusMetricsHandler)
-    print(f"eBPF Exporter: Serving metrics on port {port}")
-    httpd.serve_forever()
-
+# `metrics_store`, `update_metrics`, `get_metrics_prometheus_format`, `PrometheusMetricsHandler`, `start_metrics_server` 这些函数和变量
+# 在使用 prometheus_client 后都可以被移除或大幅简化，因为库已经提供了这些功能。
+# 为了保持代码的最小改动并展示新方法，我将只移除直接相关的部分并替换为 prometheus_client 的调用。
+# 因此，旧的 `metrics_store`, `update_metrics`, `get_metrics_prometheus_format` 将不再需要。
 
 def print_event(cpu, data, size):
     event = ct.cast(data, ct.POINTER(Event)).contents
@@ -106,12 +62,12 @@ def print_event(cpu, data, size):
         daddr = socket.inet_ntop(socket.AF_INET6, bytes(event.daddr_v6))
 
     event_type_str = ""
-    data_len_str = "" # Always 0 now
 
     source_app = comm # Default source for client processes
     dest_app = "unknown" # Default dest
+    call_type = "unknown"
 
-    if event.type == 0:
+    if event.type == 0: # ACCEPT event
         event_type_str = "ACCEPT"
         if event.dport == 3306:
             dest_app = "mysql"
@@ -119,12 +75,11 @@ def print_event(cpu, data, size):
         else:
             dest_app = "java_app_listener"
             call_type = "java-to-java"
+        source_app = 'client_app' # For accepted connections, the initiator is a "client_app"
+        # 2. 直接更新 Prometheus Counter
+        APP_CALL_COUNT.labels(source_app=source_app, dest_app=dest_app, call_type=call_type).inc()
 
-        # 这里传入的 key 依然是字典
-        key = {'source_app': 'client_app', 'dest_app': dest_app, 'call_type': call_type}
-        update_metrics(key, 'call_count')
-
-    elif event.type == 1:
+    elif event.type == 1: # CONNECT event
         event_type_str = "CONNECT"
         if event.dport == 3306:
             dest_app = "mysql"
@@ -132,10 +87,8 @@ def print_event(cpu, data, size):
         else:
             dest_app = "java_app_target"
             call_type = "java-to-java"
-
-        # 这里传入的 key 依然是字典
-        key = {'source_app': comm, 'dest_app': dest_app, 'call_type': call_type}
-        update_metrics(key, 'call_count')
+        # 2. 直接更新 Prometheus Counter
+        APP_CALL_COUNT.labels(source_app=source_app, dest_app=dest_app, call_type=call_type).inc()
 
     print(f"{timestamp_ms:10.3f} {comm:16s} ({event.pid:6d}/{event.tgid:6d}) {event_type_str:7s} "
           f"{saddr}:{event.lport:<5d} -> {daddr}:{event.dport:<5d} "
@@ -167,11 +120,14 @@ print("eBPF TCP Monitor is running. (Read/Write syscalls no longer monitored)")
 print("Press Ctrl+C to stop.")
 print(f"{'Time':<10} {'Comm':<16} {'PID/TGID':<13} {'Event':<7} {'Source':<21} {'Dest':<21} {'AF':<4}")
 
-# Start the Prometheus metrics server in a separate thread
+# --- Start Prometheus HTTP server using prometheus_client ---
 metrics_port = 8000
-metrics_thread = threading.Thread(target=start_metrics_server, args=(metrics_port,))
-metrics_thread.daemon = True # Allow main program to exit even if thread is running
-metrics_thread.start()
+try:
+    start_http_server(metrics_port)
+    print(f"eBPF Exporter: Serving metrics on port {metrics_port}")
+except Exception as e:
+    print(f"Error starting Prometheus HTTP server: {e}")
+    exit(1)
 
 # Read events from the perf buffer
 try:
