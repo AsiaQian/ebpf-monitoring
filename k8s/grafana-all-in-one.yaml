@@ -24,9 +24,17 @@ spec:
           volumeMounts:
             - name: grafana-storage
               mountPath: /var/lib/grafana
-            - name: grafana-datasources-volume # 挂载卷的名称，与下方 volumes 对应
-              mountPath: /etc/grafana/provisioning/datasources # Grafana 读取数据源配置的目录
-              readOnly: true # 只读挂载，防止容器修改配置
+            - name: grafana-datasources-config
+              mountPath: /etc/grafana/provisioning/datasources/datasource.yaml # 挂载到 Grafana 预期的位置
+              subPath: datasource.yml # 指明 ConfigMap 中的哪个 key
+            # Mount the dashboard provider config
+            - name: grafana-dashboard-provider
+              mountPath: /etc/grafana/provisioning/dashboards/dashboard-provider.yaml # 挂载到 Grafana 预期的位置
+              subPath: dashboard-provider.yaml # 指明 ConfigMap 中的哪个 key
+            # Mount the actual dashboard JSON
+            - name: grafana-dashboard-json
+              mountPath: /var/lib/grafana/dashboards/ebpf_demo_dashboard_k8s.json # 挂载到 dashboard provider 指定的路径
+              subPath: ebpf_demo_dashboard_k8s.json # 指明 ConfigMap 中的哪个 key
           env:
             - name: GF_SECURITY_ADMIN_USER
               value: admin
@@ -37,9 +45,17 @@ spec:
       volumes:
         - name: grafana-storage
           emptyDir: {} # For demonstration, use emptyDir. For persistence, use a PersistentVolumeClaim.
-        - name: grafana-datasources-volume # 卷的名称，与上方 volumeMounts 对应
+            # Mount the datasource config
+        - name: grafana-datasources-config
           configMap:
-              name: grafana-prometheus-datasource # 引用上面创建的 ConfigMap 的名称
+            name: grafana-datasources-config
+        - name: grafana-dashboard-provider
+          configMap:
+            name: grafana-dashboard-provider
+        - name: grafana-dashboard-json
+          configMap:
+            name: grafana-dashboard-json
+
 ---
 # 2. Grafana Service (NodePort for external access)
 apiVersion: v1

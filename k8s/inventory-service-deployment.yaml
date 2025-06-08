@@ -34,7 +34,7 @@ spec:
     spec:
       containers:
         - name: inventory-service # 容器名称
-          image: inventory-service:latest # 使用你本地构建的 Docker 镜像
+          image: inventory-service:v2 # 使用你本地构建的 Docker 镜像
           imagePullPolicy: Never    # 关键：告诉 Kubernetes 不要尝试从 Docker Hub 等外部注册表拉取镜像
           ports:
             - containerPort: 8081 # 容器内部暴露的端口

@@ -1,16 +1,298 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: grafana-prometheus-datasource # ConfigMap 的名称
-  namespace: monitoring # 通常 Grafana 也部署在 monitoring 命名空间，请根据实际情况修改
+  name: grafana-datasources-config # Datasource config, unchanged
+  namespace: monitoring
 data:
-  prometheus-datasources.yaml: |
-    apiVersion: 1 # Grafana 数据源配置的 API 版本
+  datasource.yml: |
+    apiVersion: 1
     datasources:
-    - name: Prometheus
-      type: prometheus 
-      access: proxy    
-      url: http://prometheus:9090
-      isDefault: true
-      editable: false 
-      version: 1      
+      - name: Prometheus
+        type: prometheus
+        uid: P_ID_PROMETHEUS
+        access: proxy
+        url: http://prometheus:9090
+        isDefault: true
+        version: 1
+        editable: false
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-provider # NEW: ConfigMap for the provisioning YAML
+  namespace: monitoring
+data:
+  dashboard-provider.yaml: | # This YAML tells Grafana how to find dashboards
+    apiVersion: 1
+    providers:
+      - name: 'ebpf-demo-dashboard'
+        orgId: 1
+        folder: '' # Dashboards will appear in the root folder
+        type: file
+        disableDelete: false
+        editable: true
+        options:
+          path: /var/lib/grafana/dashboards # This is the path where the actual JSON files will be mounted
+          # Grafana will scan this directory for JSON files
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-json # NEW: ConfigMap for the actual dashboard JSON
+  namespace: monitoring
+data:
+  ebpf_demo_dashboard_k8s.json: | # Renamed key to end with .json
+    {
+      "annotations": {
+        "list": [
+          {
+            "builtIn": 1,
+            "datasource": {
+              "type": "datasource",
+              "uid": "grafana"
+            },
+            "enable": true,
+            "hide": true,
+            "iconColor": "rgba(0, 211, 255, 1)",
+            "name": "Annotations & Alerts",
+            "type": "dashboard"
+          }
+        ]
+      },
+      "editable": true,
+      "fiscalYearStartMonth": 0,
+      "graphTooltip": 0,
+      "id": null,
+      "links": [],
+      "liveNow": false,
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P_ID_PROMETHEUS"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 0
+          },
+          "id": 2,
+          "options": {
+            "colorMode": "value",
+            "graph": {
+              "stackProportion": false,
+              "type": "area"
+            },
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "right",
+              "showLegend": true
+            },
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "value"
+          },
+          "targets": [
+            {
+              "expr": "sum by (source_comm, source_ip, server_listen_port, dest_ip, dest_port) (rate(ebpf_connection_event_total[1m]))",
+              "refId": "A"
+            }
+          ],
+          "title": "Raw Connection Acceptance Events per Second (All)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P_ID_PROMETHEUS"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 8
+          },
+          "id": 3,
+          "options": {
+            "colorMode": "value",
+            "graph": {
+              "stackProportion": false,
+              "type": "area"
+            },
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "right",
+              "showLegend": true
+            },
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "value"
+          },
+          "targets": [
+            {
+              "expr": "sum by (source_app, dest_app) (\n  label_replace(\n    label_replace(\n      rate(ebpf_connection_event_total{source_comm=\"http-nio-8081-A\", source_ip=\"::ffff:10.244.0.67\"}[1m]),\n      \"source_app\", \"OrderService\", \"\", \"\"\n    ),\n    \"dest_app\", \"InventoryService\", \"\", \"\"\n  )\n)",
+              "refId": "A"
+            }
+          ],
+          "title": "OrderService -> InventoryService Calls",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P_ID_PROMETHEUS"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 8
+          },
+          "id": 4,
+          "options": {
+            "colorMode": "value",
+            "graph": {
+              "stackProportion": false,
+              "type": "area"
+            },
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "right",
+              "showLegend": true
+            },
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "value"
+          },
+          "targets": [
+            {
+              "expr": "sum by (source_app, dest_app) (\n  label_replace(\n    label_replace(\n      rate(ebpf_connection_event_total{source_comm=\"mysqld\", source_ip=\"::ffff:10.244.0.67\"}[1m]),\n      \"source_app\", \"OrderService\", \"\", \"\"\n    ),\n    \"dest_app\", \"MySQL\", \"\", \"\"  \n  )\n)",
+              "refId": "A"
+            }
+          ],
+          "title": "OrderService -> MySQL Calls (Simplified)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P_ID_PROMETHEUS"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 16
+          },
+          "id": 5,
+          "options": {
+            "colorMode": "value",
+            "graph": {
+              "stackProportion": false,
+              "type": "area"
+            },
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "right",
+              "showLegend": true
+            },
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "value"
+          },
+          "targets": [
+            {
+              "expr": "sum by (source_app, dest_app) (\n  label_replace(\n    label_replace(\n      rate(ebpf_connection_event_total{source_comm=\"mysqld\", source_ip=\"::ffff:10.244.0.66\"}[1m]),\n      \"source_app\", \"InventoryService\", \"\", \"\"\n    ),\n    \"dest_app\", \"MySQL\", \"\", \"\" \n  )\n)",
+              "refId": "A"
+            }
+          ],
+          "title": "InventoryService -> MySQL Calls (Simplified)",
+          "type": "timeseries"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "P_ID_PROMETHEUS"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 16
+          },
+          "id": 6,
+          "options": {
+            "colorMode": "value",
+            "graph": {
+              "stackProportion": false,
+              "type": "area"
+            },
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "right",
+              "showLegend": true
+            },
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "textMode": "value"
+          },
+          "targets": [
+            {
+              "expr": "sum by (source_app, dest_app) (\n  label_replace(\n    label_replace(\n      rate(ebpf_connection_event_total{source_comm=\"http-nio-8080-A\", source_ip=\"::ffff:127.0.0.1\"}[1m]),\n      \"source_app\", \"External\", \"\", \"\"\n    ),\n    \"dest_app\", \"OrderService\", \"\", \"\" \n  )\n)",
+              "refId": "A"
+            }
+          ],
+          "title": "External -> OrderService Calls",
+          "type": "timeseries"
+        }
+      ],
+      "schemaVersion": 37,
+      "style": "dark",
+      "tags": [],
+      "templating": {
+        "list": []
+      },
+      "time": {
+        "from": "now-5m",
+        "to": "now"
+      },
+      "timepicker": {},
+      "timezone": "",
+      "title": "eBPF Application Monitoring Demo (K8s)",
+      "uid": "ebpf_demo_dashboard_k8s",
+      "version": 1
+    }
+

@@ -17,7 +17,7 @@ cd $PROJECT_ROOT
 # --- 2. 构建 Docker 镜像 ---
 echo "Building Docker image..."
 # 确保 Dockerfile 在 docker/ 目录下，并且构建上下文是项目根目录
-docker build -f docker/Dockerfile.inventory -t inventory-service:latest .
+docker build -f docker/Dockerfile.inventory -t inventory-service:v2 .
 
 if [ $? -ne 0 ]; then
     echo "Error: Docker image build failed."

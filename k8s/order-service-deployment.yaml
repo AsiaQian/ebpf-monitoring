@@ -34,7 +34,7 @@ spec:
     spec:
       containers:
         - name: order-service
-          image: order-service:latest # Use the image built in Minikube's Docker daemon
+          image: order-service:v2 # Use the image built in Minikube's Docker daemon
           imagePullPolicy: Never # Crucial: tells Kubernetes not to try pulling from Docker Hub or other registries
           ports:
             - containerPort: 8080
